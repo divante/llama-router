@@ -1,0 +1,10 @@
+{
+  "gpu": {
+    "n-gpu-layers": 999
+  },
+  "cpu": {
+    "n-gpu-layers": 0,
+    "batch-size": 512,
+    "ubatch-size": 256
+  }
+}
