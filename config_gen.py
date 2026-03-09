@@ -4,7 +4,9 @@ For each .gguf file in the models directory, creates two preset sections:
   - [{stem}-gpu]  (n-gpu-layers=999, fully offloaded)
   - [{stem}-cpu]  (n-gpu-layers=0, pure CPU)
 
-Both point to the same model file path.
+Both point to the same model file path via explicit `model = /path`.
+Uses --models-preset only (no --models-dir), so these are the only models
+llama-server knows about.
 
 Outputs:
   - presets.ini for llama-server's --models-preset flag
