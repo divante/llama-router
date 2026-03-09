@@ -1,12 +1,12 @@
 """Generate llama-server preset INI with dual GPU/CPU entries per GGUF model.
 
 For each .gguf file in the models directory, creates two preset sections:
-  - [{stem}-gpu]  with params from group_params.json "gpu"
-  - [{stem}-cpu]  with params from group_params.json "cpu"
+  - [{stem}-gpu]  with params from group_params.yaml "gpu"
+  - [{stem}-cpu]  with params from group_params.yaml "cpu"
 
 Both point to the same model file path via explicit `model = /path`.
 
-group_params.json defines arbitrary llama-server preset keys per group.
+group_params.yaml defines arbitrary llama-server preset keys per group.
 Any key valid in a --models-preset INI section can be used (corresponds
 to CLI args without leading dashes, e.g. "batch-size", "threads",
 "flash-attn", "ctx-size", "cache-type-k", etc.).
@@ -16,7 +16,7 @@ Outputs:
   - model_sizes.json mapping stem -> file size in bytes (used by the router)
 
 Usage:
-    python config_gen.py /models /config/presets.ini [/path/to/group_params.json]
+    python config_gen.py /models /config/presets.ini [/path/to/group_params.yaml]
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ import json
 import sys
 from pathlib import Path
 
+import yaml
+
 DEFAULT_GROUP_PARAMS = {
     "gpu": {"n-gpu-layers": 999},
     "cpu": {"n-gpu-layers": 0},
@@ -32,16 +34,16 @@ DEFAULT_GROUP_PARAMS = {
 
 
 def load_group_params(path: Path | None) -> dict[str, dict[str, str | int]]:
-    """Load group parameters from JSON, falling back to defaults."""
+    """Load group parameters from YAML, falling back to defaults."""
     if path and path.exists():
-        params = json.loads(path.read_text())
+        params = yaml.safe_load(path.read_text())
         print(f"Loaded group params from {path}")
         return params
 
-    # Check for group_params.json next to this script
-    local = Path(__file__).parent / "group_params.json"
+    # Check for group_params.yaml next to this script
+    local = Path(__file__).parent / "group_params.yaml"
     if local.exists():
-        params = json.loads(local.read_text())
+        params = yaml.safe_load(local.read_text())
         print(f"Loaded group params from {local}")
         return params
 
@@ -109,7 +111,7 @@ def generate_config(
 if __name__ == "__main__":
     if len(sys.argv) < 3 or len(sys.argv) > 4:
         print(
-            f"Usage: {sys.argv[0]} <models_dir> <output_preset_path> [group_params.json]",
+            f"Usage: {sys.argv[0]} <models_dir> <output_preset_path> [group_params.yaml]",
             file=sys.stderr,
         )
         sys.exit(1)
