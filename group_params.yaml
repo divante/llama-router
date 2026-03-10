@@ -6,6 +6,7 @@ gpu:
 
 cpu:
   n-gpu-layers: 0
-  batch-size: 256
-  ubatch-size: 128
+  batch-size: 512
+  ubatch-size: 256
+  threads: 8
   sleep-idle-seconds: 600
