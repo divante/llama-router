@@ -1,5 +1,7 @@
 gpu:
   n-gpu-layers: 999
+  batch-size: 2048
+  ubatch-size: 512
   sleep-idle-seconds: 300
 
 cpu:
