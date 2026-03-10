@@ -6,6 +6,7 @@ gpu:
 
 cpu:
   n-gpu-layers: 0
+  kv-offload: "off"
   batch-size: 512
   ubatch-size: 256
   threads: 8
