@@ -35,6 +35,9 @@ VRAM_USED_PATH = os.environ.get(
     "VRAM_USED_PATH", "/sys/class/drm/card0/device/mem_info_vram_used"
 )
 MODEL_SIZES_PATH = Path(os.environ.get("MODEL_SIZES_PATH", "/config/model_sizes.json"))
+FORCE_CPU_MODELS: set[str] = set(
+    m.strip() for m in os.environ.get("FORCE_CPU_MODELS", "").split(",") if m.strip()
+)
 
 # ---------------------------------------------------------------------------
 # VRAM helpers
@@ -99,6 +102,11 @@ def route_model(requested_model: str) -> str:
     Returns the aliased model name (e.g. 'qwen3.5-35b-gpu' or 'qwen3.5-35b-cpu').
     """
     stem = _strip_suffix(requested_model)
+
+    if stem in FORCE_CPU_MODELS:
+        logger.info("Forced CPU (config): %s", stem)
+        return f"{stem}-cpu"
+
     model_size = get_model_size(stem)
     vram_free = get_vram_free_bytes()
     headroom = VRAM_HEADROOM_MB * 1024 * 1024
@@ -149,8 +157,9 @@ async def _startup() -> None:
     _client = httpx.AsyncClient(base_url=LLAMA_SERVER_URL, timeout=httpx.Timeout(600.0))
     _load_model_sizes()
     logger.info(
-        "Router started — backend=%s, headroom=%dMB, models=%d",
+        "Router started — backend=%s, headroom=%dMB, models=%d, force_cpu=%s",
         LLAMA_SERVER_URL, VRAM_HEADROOM_MB, len(_model_sizes),
+        FORCE_CPU_MODELS or "(none)",
     )
 
 
