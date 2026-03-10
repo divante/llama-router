@@ -9,4 +9,5 @@ cpu:
   batch-size: 512
   ubatch-size: 256
   threads: 8
+  ctx-size: 32768
   sleep-idle-seconds: 600

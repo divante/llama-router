@@ -197,24 +197,76 @@ async def _proxy_request(
 
     is_stream = body.get("stream", False)
 
-    upstream = await _client.send(
-        _client.build_request(
-            "POST",
-            path,
-            json=body,
-            headers={"content-type": "application/json"},
-        ),
-        stream=is_stream,
-    )
+    try:
+        upstream = await _client.send(
+            _client.build_request(
+                "POST",
+                path,
+                json=body,
+                headers={"content-type": "application/json"},
+            ),
+            stream=is_stream,
+        )
+    except httpx.ConnectError as exc:
+        logger.error("Backend connection failed for %s: %s", body.get("model", "?"), exc)
+        return JSONResponse(
+            content={"error": {"message": f"Backend unavailable: {exc}", "type": "server_error"}},
+            status_code=502,
+        )
 
     if is_stream:
+        if upstream.status_code >= 500:
+            body_bytes = b""
+            async for chunk in upstream.aiter_bytes():
+                body_bytes += chunk
+            model_name = body.get("model", "unknown")
+            logger.error(
+                "Backend stream error for %s: status=%d, body=%s",
+                model_name, upstream.status_code, body_bytes[:200],
+            )
+            return JSONResponse(
+                content={
+                    "error": {
+                        "message": f"Backend returned {upstream.status_code} for model {model_name}",
+                        "type": "server_error",
+                    }
+                },
+                status_code=upstream.status_code,
+            )
         return StreamingResponse(
             _proxy_stream(upstream),
             status_code=upstream.status_code,
             media_type=upstream.headers.get("content-type", "text/event-stream"),
         )
 
-    data = upstream.json()
+    # Handle non-JSON or empty responses from upstream
+    raw = upstream.content
+    if upstream.status_code >= 500 or not raw or not raw.strip():
+        model_name = body.get("model", "unknown")
+        logger.error(
+            "Backend error for %s: status=%d, body=%s",
+            model_name, upstream.status_code, raw[:200] if raw else "(empty)",
+        )
+        return JSONResponse(
+            content={
+                "error": {
+                    "message": f"Backend returned {upstream.status_code} for model {model_name}",
+                    "type": "server_error",
+                }
+            },
+            status_code=upstream.status_code if upstream.status_code >= 400 else 502,
+        )
+
+    try:
+        data = upstream.json()
+    except (json.JSONDecodeError, ValueError):
+        logger.error(
+            "Invalid JSON from backend for %s: %s", body.get("model", "?"), raw[:200]
+        )
+        return JSONResponse(
+            content={"error": {"message": "Backend returned invalid JSON", "type": "server_error"}},
+            status_code=502,
+        )
     return JSONResponse(content=data, status_code=upstream.status_code)
 
 
