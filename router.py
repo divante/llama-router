@@ -2,6 +2,12 @@
 
 Drop-in replacement for Ollama on port 11434. Routes requests to GPU or CPU
 model variants based on available VRAM, read from AMD sysfs.
+
+Routing priority:
+1. FORCE_CPU_MODELS — always CPU
+2. GPU variant already loaded in llama-server — route to GPU (skip VRAM check)
+3. Enough free VRAM for the model + headroom — route to GPU
+4. Otherwise — route to CPU
 """
 
 from __future__ import annotations
@@ -9,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -38,6 +45,7 @@ MODEL_SIZES_PATH = Path(os.environ.get("MODEL_SIZES_PATH", "/config/model_sizes.
 FORCE_CPU_MODELS: set[str] = set(
     m.strip() for m in os.environ.get("FORCE_CPU_MODELS", "").split(",") if m.strip()
 )
+LOADED_MODELS_TTL_SECONDS = int(os.environ.get("LOADED_MODELS_TTL_SECONDS", "5"))
 
 # ---------------------------------------------------------------------------
 # VRAM helpers
@@ -86,6 +94,48 @@ def get_model_size(stem: str) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# Loaded model tracking
+# ---------------------------------------------------------------------------
+
+_loaded_gpu_models: set[str] = set()
+_loaded_models_updated_at: float = 0.0
+
+
+async def _refresh_loaded_models() -> None:
+    """Query llama-server /models endpoint and cache loaded GPU model stems."""
+    global _loaded_gpu_models, _loaded_models_updated_at
+
+    now = time.monotonic()
+    if now - _loaded_models_updated_at < LOADED_MODELS_TTL_SECONDS:
+        return
+
+    try:
+        resp = await _client.get("/models", timeout=5.0)
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("Failed to query /models for loaded status: %s", exc)
+        return
+
+    loaded: set[str] = set()
+    for model in data.get("data", []):
+        model_id = model.get("id", "")
+        status = model.get("status", {}).get("value", "")
+        if status == "loaded" and model_id.endswith("-gpu"):
+            loaded.add(_strip_suffix(model_id))
+
+    _loaded_gpu_models = loaded
+    _loaded_models_updated_at = now
+
+    if loaded:
+        logger.debug("Loaded GPU models: %s", loaded)
+
+
+def is_gpu_model_loaded(stem: str) -> bool:
+    """Check if the GPU variant of a model is currently loaded."""
+    return stem in _loaded_gpu_models
+
+
+# ---------------------------------------------------------------------------
 # Routing
 # ---------------------------------------------------------------------------
 
@@ -96,23 +146,34 @@ def _strip_suffix(model: str) -> str:
     return model
 
 
-def route_model(requested_model: str) -> str:
+async def route_model(requested_model: str) -> str:
     """Decide GPU or CPU variant for the requested model.
 
-    Returns the aliased model name (e.g. 'qwen3.5-35b-gpu' or 'qwen3.5-35b-cpu').
+    Priority:
+    1. FORCE_CPU_MODELS — always CPU
+    2. GPU variant already loaded — route to GPU (no VRAM check needed)
+    3. Enough free VRAM — route to GPU
+    4. Otherwise — route to CPU
     """
     stem = _strip_suffix(requested_model)
 
+    # 1. Forced CPU
     if stem in FORCE_CPU_MODELS:
         logger.info("Forced CPU (config): %s", stem)
         return f"{stem}-cpu"
 
+    # 2. GPU variant already loaded — skip VRAM check
+    await _refresh_loaded_models()
+    if is_gpu_model_loaded(stem):
+        logger.info("GPU (already loaded): %s", stem)
+        return f"{stem}-gpu"
+
+    # 3. VRAM-based routing for models not currently loaded
     model_size = get_model_size(stem)
     vram_free = get_vram_free_bytes()
     headroom = VRAM_HEADROOM_MB * 1024 * 1024
 
     if vram_free is None:
-        # Can't read VRAM — default to CPU to be safe
         logger.warning(
             "VRAM sysfs unavailable — routing %s to CPU", stem
         )
@@ -157,9 +218,9 @@ async def _startup() -> None:
     _client = httpx.AsyncClient(base_url=LLAMA_SERVER_URL, timeout=httpx.Timeout(600.0))
     _load_model_sizes()
     logger.info(
-        "Router started — backend=%s, headroom=%dMB, models=%d, force_cpu=%s",
+        "Router started — backend=%s, headroom=%dMB, models=%d, force_cpu=%s, loaded_ttl=%ds",
         LLAMA_SERVER_URL, VRAM_HEADROOM_MB, len(_model_sizes),
-        FORCE_CPU_MODELS or "(none)",
+        FORCE_CPU_MODELS or "(none)", LOADED_MODELS_TTL_SECONDS,
     )
 
 
@@ -193,7 +254,7 @@ async def _proxy_request(
             body["model"] = f"{stem}-cpu"
             logger.info("Forced CPU: %s -> %s", original, body["model"])
         else:
-            body["model"] = route_model(original)
+            body["model"] = await route_model(original)
 
     is_stream = body.get("stream", False)
 
