@@ -146,6 +146,12 @@ def _strip_suffix(model: str) -> str:
     return model
 
 
+def _normalize_model(model: str) -> str:
+    if model.startswith("openai/"):
+        return model[7:]
+    return model
+
+
 async def route_model(requested_model: str) -> str:
     """Decide GPU or CPU variant for the requested model.
 
@@ -243,18 +249,23 @@ async def _proxy_request(
     path: str,
     route: bool = True,
     force_cpu: bool = False,
+    strip_nulls: bool = False,
 ) -> StreamingResponse | JSONResponse:
     """Forward a request to llama-server, optionally routing the model."""
     body = await request.json()
 
+    if strip_nulls:
+        body = {k: v for k, v in body.items() if v is not None}
+
     if route and "model" in body:
         original = body["model"]
+        normalized = _normalize_model(original)
         if force_cpu:
-            stem = _strip_suffix(original)
+            stem = _strip_suffix(normalized)
             body["model"] = f"{stem}-cpu"
             logger.info("Forced CPU: %s -> %s", original, body["model"])
         else:
-            body["model"] = await route_model(original)
+            body["model"] = await route_model(normalized)
 
     is_stream = body.get("stream", False)
 
@@ -346,7 +357,7 @@ async def completions(request: Request):
 @app.post("/v1/embeddings")
 async def embeddings(request: Request):
     """Embeddings always go to CPU to preserve VRAM for generation."""
-    return await _proxy_request(request, "/v1/embeddings", force_cpu=True)
+    return await _proxy_request(request, "/v1/embeddings", force_cpu=True, strip_nulls=True)
 
 
 @app.get("/v1/models")
