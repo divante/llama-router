@@ -6,9 +6,9 @@ gpu:
 
 cpu:
   n-gpu-layers: 0
-  kv-offload: off
+  # kv-offload: off
   batch-size: 512
   ubatch-size: 256
-  threads: 8
-  ctx-size: 32768
-  sleep-idle-seconds: 600
+  # threads: 8
+  # ctx-size: 32768
+  sleep-idle-seconds: 300
