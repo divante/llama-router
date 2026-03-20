@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 
 import httpx
+
+from sanitizer import sanitize_response
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
@@ -331,6 +333,7 @@ async def _proxy_request(
 
     try:
         data = upstream.json()
+        data = sanitize_response(data)
     except (json.JSONDecodeError, ValueError):
         logger.error(
             "Invalid JSON from backend for %s: %s", body.get("model", "?"), raw[:200]

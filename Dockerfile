@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY config_gen.py .
 COPY group_params.yaml .
+COPY sanitizer.py .
 COPY router.py .
 
 EXPOSE 11434
