@@ -24,5 +24,5 @@ Key env vars:
 ## Sibling Repos
 
 - `normandy-sr2/` — Compose files, agent configs
-- `normandy-dispatcher/` — Task dispatcher
+- `harbinger/` — Task dispatcher
 - `sr2/` — SR2 library
