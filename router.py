@@ -392,3 +392,99 @@ async def health():
 @app.get("/")
 async def root():
     return {"status": "ok", "service": "llama-router"}
+
+
+# ---------------------------------------------------------------------------
+# Capacity check endpoint
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/capacity/check")
+async def capacity_check(model: str):
+    """Check whether the router can serve a model right now.
+
+    Returns memory availability, routing decision, and loaded model list.
+    Used by Harbinger to make spawn decisions before claiming tasks.
+    """
+    stem = _strip_suffix(_normalize_model(model))
+
+    # Refresh loaded models cache
+    await _refresh_loaded_models()
+
+    # Gather memory info
+    vram_total = _read_sysfs(VRAM_TOTAL_PATH)
+    vram_used = _read_sysfs(VRAM_USED_PATH)
+    vram_free = (vram_total - vram_used) if (vram_total is not None and vram_used is not None) else None
+    model_size = get_model_size(stem)
+    headroom = VRAM_HEADROOM_MB * 1024 * 1024
+
+    memory_info = {
+        "total_mb": (vram_total // (1024 * 1024)) if vram_total else None,
+        "used_mb": (vram_used // (1024 * 1024)) if vram_used else None,
+        "free_mb": (vram_free // (1024 * 1024)) if vram_free else None,
+        "model_size_mb": (model_size // (1024 * 1024)) if model_size else None,
+        "headroom_mb": VRAM_HEADROOM_MB,
+    }
+
+    # Get all loaded model IDs from cache
+    loaded = sorted(_loaded_gpu_models)
+
+    # Decision logic
+    # 1. Forced CPU
+    if stem in FORCE_CPU_MODELS:
+        return JSONResponse(content={
+            "model": stem,
+            "can_serve": True,
+            "routing": "cpu",
+            "reason": "model is in FORCE_CPU_MODELS",
+            "memory": memory_info,
+            "loaded_models": loaded,
+        })
+
+    # 2. Already loaded (GPU)
+    if is_gpu_model_loaded(stem):
+        return JSONResponse(content={
+            "model": stem,
+            "can_serve": True,
+            "routing": "gpu",
+            "reason": "model already loaded",
+            "memory": memory_info,
+            "loaded_models": loaded,
+        })
+
+    # 3. Enough free memory
+    if vram_free is not None and model_size is not None:
+        if vram_free >= model_size + headroom:
+            return JSONResponse(content={
+                "model": stem,
+                "can_serve": True,
+                "routing": "gpu",
+                "reason": "model fits in available memory",
+                "memory": memory_info,
+                "loaded_models": loaded,
+            })
+        else:
+            free_mb = vram_free // (1024 * 1024)
+            need_mb = (model_size + headroom) // (1024 * 1024)
+            return JSONResponse(content={
+                "model": stem,
+                "can_serve": False,
+                "routing": "unavailable",
+                "reason": f"insufficient memory (need {need_mb}MB, have {free_mb}MB free)",
+                "memory": memory_info,
+                "loaded_models": loaded,
+            })
+
+    # 4. Can't determine — missing sysfs or model size
+    if model_size is None:
+        reason = f"unknown model size for '{stem}'"
+    else:
+        reason = "memory sysfs unavailable"
+
+    return JSONResponse(content={
+        "model": stem,
+        "can_serve": False,
+        "routing": "unavailable",
+        "reason": reason,
+        "memory": memory_info,
+        "loaded_models": loaded,
+    })

@@ -4,12 +4,21 @@
 
 ## Files
 
-- `router.py` — Main proxy server (FastAPI). Routes `/v1/chat/completions` and `/api/chat` to llama.cpp slots.
+- `router.py` — Main proxy server (FastAPI). Routes `/v1/chat/completions` and `/api/chat` to llama.cpp slots. Includes `/v1/capacity/check` endpoint for pre-spawn memory checks.
 - `sanitizer.py` — Request/response sanitization
 - `config_gen.py` — Generates llama.cpp `presets.ini` from model directory + group params
 - `group_params.yaml` — Model group definitions (context size, GPU layers per group)
 - `Dockerfile` — Container build
 - `requirements.txt` — Python dependencies
+
+## Endpoints
+
+- `POST /v1/chat/completions` — Proxied chat completions with model routing
+- `POST /v1/completions` — Proxied completions
+- `POST /v1/embeddings` — Always CPU-routed embeddings
+- `GET /v1/models` — Deduplicated model list (strips -gpu/-cpu suffixes)
+- `GET /v1/capacity/check?model={name}` — Memory-aware capacity check. Returns `can_serve`, `routing`, `reason`, `memory` info, and `loaded_models`. Used by Harbinger for spawn decisions.
+- `GET /health` — Backend health proxy
 
 ## Running
 
