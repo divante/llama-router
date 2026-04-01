@@ -1,9 +1,10 @@
-"""VRAM-aware LLM router for llama-server.
+"""LLM router for llama-server.
 
-Drop-in replacement for Ollama on port 11434. Routes requests to GPU or CPU
-model variants based on available VRAM, read from AMD sysfs.
+Supports two routing modes (ROUTING_MODE env var):
+  - cpu_only: pass model name through without suffix (no VRAM checks)
+  - split:    VRAM-aware GPU/CPU routing with -gpu/-cpu suffixes
 
-Routing priority:
+Split mode routing priority:
 1. FORCE_CPU_MODELS — always CPU
 2. GPU variant already loaded in llama-server — route to GPU (skip VRAM check)
 3. Enough free VRAM for the model + headroom — route to GPU
@@ -34,6 +35,7 @@ logging.basicConfig(
 # Config
 # ---------------------------------------------------------------------------
 
+ROUTING_MODE = os.environ.get("ROUTING_MODE", "cpu_only")  # "cpu_only" or "split"
 LLAMA_SERVER_URL = os.environ.get("LLAMA_SERVER_URL", "http://llama-server:8080")
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/models"))
 VRAM_HEADROOM_MB = int(os.environ.get("VRAM_HEADROOM_MB", "1024"))
@@ -155,15 +157,18 @@ def _normalize_model(model: str) -> str:
 
 
 async def route_model(requested_model: str) -> str:
-    """Decide GPU or CPU variant for the requested model.
+    """Decide which model preset to route to.
 
-    Priority:
-    1. FORCE_CPU_MODELS — always CPU
-    2. GPU variant already loaded — route to GPU (no VRAM check needed)
-    3. Enough free VRAM — route to GPU
-    4. Otherwise — route to CPU
+    In cpu_only mode, returns the bare stem (no suffix).
+    In split mode, applies VRAM-aware GPU/CPU routing.
     """
     stem = _strip_suffix(requested_model)
+
+    if ROUTING_MODE == "cpu_only":
+        logger.info("Route (cpu_only): %s", stem)
+        return stem
+
+    # --- split mode ---
 
     # 1. Forced CPU
     if stem in FORCE_CPU_MODELS:
@@ -226,8 +231,8 @@ async def _startup() -> None:
     _client = httpx.AsyncClient(base_url=LLAMA_SERVER_URL, timeout=httpx.Timeout(600.0))
     _load_model_sizes()
     logger.info(
-        "Router started — backend=%s, headroom=%dMB, models=%d, force_cpu=%s, loaded_ttl=%ds",
-        LLAMA_SERVER_URL, VRAM_HEADROOM_MB, len(_model_sizes),
+        "Router started — mode=%s, backend=%s, headroom=%dMB, models=%d, force_cpu=%s, loaded_ttl=%ds",
+        ROUTING_MODE, LLAMA_SERVER_URL, VRAM_HEADROOM_MB, len(_model_sizes),
         FORCE_CPU_MODELS or "(none)", LOADED_MODELS_TTL_SECONDS,
     )
 
@@ -264,7 +269,7 @@ async def _proxy_request(
         normalized = _normalize_model(original)
         if force_cpu:
             stem = _strip_suffix(normalized)
-            body["model"] = f"{stem}-cpu"
+            body["model"] = stem if ROUTING_MODE == "cpu_only" else f"{stem}-cpu"
             logger.info("Forced CPU: %s -> %s", original, body["model"])
         else:
             body["model"] = await route_model(normalized)
@@ -365,7 +370,11 @@ async def embeddings(request: Request):
 
 @app.get("/v1/models")
 async def list_models():
-    """Return deduplicated model list (strips -gpu/-cpu suffixes)."""
+    """Return deduplicated model list.
+
+    In split mode, strips -gpu/-cpu suffixes and deduplicates.
+    In cpu_only mode, models already have clean names — still dedup for safety.
+    """
     resp = await _client.get("/v1/models")
     data = resp.json()
 
@@ -406,6 +415,22 @@ async def capacity_check(model: str):
     Used by Harbinger to make spawn decisions before claiming tasks.
     """
     stem = _strip_suffix(_normalize_model(model))
+
+    # In cpu_only mode, we can always serve (no VRAM gating)
+    if ROUTING_MODE == "cpu_only":
+        model_size = get_model_size(stem)
+        return JSONResponse(content={
+            "model": stem,
+            "can_serve": True,
+            "routing": "cpu_only",
+            "reason": "cpu_only mode — no VRAM gating",
+            "memory": {
+                "model_size_mb": (model_size // (1024 * 1024)) if model_size else None,
+            },
+            "loaded_models": [],
+        })
+
+    # --- split mode ---
 
     # Refresh loaded models cache
     await _refresh_loaded_models()

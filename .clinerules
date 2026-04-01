@@ -1,0 +1,19 @@
+# llama-router — LLM Routing Proxy
+
+## What is llama-router?
+- VRAM-aware proxy that routes LLM requests to GPU or CPU model variants
+- Drop-in Ollama replacement (port 11434)
+- Routes to llama.cpp server (port 11435 internal)
+
+## Key Files
+- router.py — Main FastAPI proxy server
+- sanitizer.py — Request/response sanitization
+- config_gen.py — Generates llama.cpp presets.ini from model directory
+- group_params.yaml — Model group definitions
+
+## Conventions
+- Python, FastAPI
+- VRAM monitoring via AMD sysfs paths
+- GPU variant: model-stem-gpu (n-gpu-layers: 999)
+- CPU variant: model-stem-cpu (n-gpu-layers: 0)
+- FORCE_CPU_MODELS env var for always-CPU models

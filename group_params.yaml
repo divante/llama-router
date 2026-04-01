@@ -1,3 +1,8 @@
+# mode: cpu_only | split
+#   cpu_only — one preset per model, no -gpu/-cpu suffix, uses "cpu" params
+#   split    — two presets per model ({stem}-gpu and {stem}-cpu)
+mode: cpu_only
+
 gpu:
   n-gpu-layers: 999
   sleep-idle-seconds: 300

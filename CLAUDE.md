@@ -6,8 +6,8 @@
 
 - `router.py` — Main proxy server (FastAPI). Routes `/v1/chat/completions` and `/api/chat` to llama.cpp slots. Includes `/v1/capacity/check` endpoint for pre-spawn memory checks.
 - `sanitizer.py` — Request/response sanitization
-- `config_gen.py` — Generates llama.cpp `presets.ini` from model directory + group params
-- `group_params.yaml` — Model group definitions (context size, GPU layers per group)
+- `config_gen.py` — Generates llama.cpp `presets.ini` from model directory + group params. Respects `mode` from group_params.yaml.
+- `group_params.yaml` — Model group definitions and routing mode (`cpu_only` or `split`)
 - `Dockerfile` — Container build
 - `requirements.txt` — Python dependencies
 
@@ -25,10 +25,11 @@
 Built and run via Docker Compose in `normandy-sr2/docker-composes/llm-compose.yaml`.
 
 Key env vars:
+- `ROUTING_MODE` — `cpu_only` (no suffixes, no VRAM checks) or `split` (GPU/CPU routing, default)
 - `LLAMA_SERVER_URL` — llama.cpp server address
 - `MODEL_DIR` — Path to GGUF model files
-- `VRAM_HEADROOM_MB` — Reserved VRAM buffer
-- `FORCE_CPU_MODELS` — Comma-separated models to force CPU inference
+- `VRAM_HEADROOM_MB` — Reserved VRAM buffer (split mode only)
+- `FORCE_CPU_MODELS` — Comma-separated models to force CPU inference (split mode only)
 
 ## Sibling Repos
 
