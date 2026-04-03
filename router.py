@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -37,6 +38,26 @@ logging.basicConfig(
 
 ROUTING_MODE = os.environ.get("ROUTING_MODE", "cpu_only")  # "cpu_only" or "split"
 LLAMA_SERVER_URL = os.environ.get("LLAMA_SERVER_URL", "http://llama-server:8080")
+# Model-to-vLLM-backend routing table.
+# Format: "model=url" (direct) or "model=url@host" (sets Host header for reverse proxy)
+# e.g. "qwen3.5:27b=http://192.168.50.117:80@vllm-primary.normandy"
+@dataclass
+class VllmRoute:
+    url: str
+    host: str | None = None  # Custom Host header (for Traefik/Sablier routing)
+
+_VLLM_ROUTES_RAW = os.environ.get("VLLM_ROUTES", "")
+VLLM_ROUTES: dict[str, VllmRoute] = {}
+for entry in _VLLM_ROUTES_RAW.split(","):
+    entry = entry.strip()
+    if "=" in entry:
+        model, target = entry.split("=", 1)
+        target = target.strip()
+        if "@" in target:
+            url, host = target.rsplit("@", 1)
+            VLLM_ROUTES[model.strip()] = VllmRoute(url=url, host=host)
+        else:
+            VLLM_ROUTES[model.strip()] = VllmRoute(url=target)
 MODEL_DIR = Path(os.environ.get("MODEL_DIR", "/models"))
 VRAM_HEADROOM_MB = int(os.environ.get("VRAM_HEADROOM_MB", "1024"))
 VRAM_TOTAL_PATH = os.environ.get(
@@ -50,6 +71,7 @@ FORCE_CPU_MODELS: set[str] = set(
     m.strip() for m in os.environ.get("FORCE_CPU_MODELS", "").split(",") if m.strip()
 )
 LOADED_MODELS_TTL_SECONDS = int(os.environ.get("LOADED_MODELS_TTL_SECONDS", "5"))
+REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "3600"))
 
 # ---------------------------------------------------------------------------
 # VRAM helpers
@@ -223,17 +245,42 @@ async def route_model(requested_model: str) -> str:
 
 app = FastAPI(title="llama-router")
 _client: httpx.AsyncClient | None = None
+_vllm_clients: dict[str, httpx.AsyncClient] = {}  # url -> client
+
+
+def _is_vllm_model(stem: str) -> bool:
+    """Check if a model should be routed to a vLLM backend."""
+    return stem in VLLM_ROUTES
+
+
+def _get_vllm_route(stem: str) -> VllmRoute | None:
+    """Return the vLLM route config for a model, or None."""
+    return VLLM_ROUTES.get(stem)
+
+
+def _get_client_for_model(stem: str) -> httpx.AsyncClient:
+    """Return the appropriate backend client for a model."""
+    route = _get_vllm_route(stem)
+    if route and route.url in _vllm_clients:
+        return _vllm_clients[route.url]
+    return _client
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     global _client
-    _client = httpx.AsyncClient(base_url=LLAMA_SERVER_URL, timeout=httpx.Timeout(600.0))
+    _client = httpx.AsyncClient(base_url=LLAMA_SERVER_URL, timeout=httpx.Timeout(float(REQUEST_TIMEOUT)))
+    for route in VLLM_ROUTES.values():
+        if route.url not in _vllm_clients:
+            _vllm_clients[route.url] = httpx.AsyncClient(base_url=route.url, timeout=httpx.Timeout(float(REQUEST_TIMEOUT)))
     _load_model_sizes()
+    routes_summary = {m: f"{r.url}{'@' + r.host if r.host else ''}" for m, r in VLLM_ROUTES.items()}
     logger.info(
-        "Router started — mode=%s, backend=%s, headroom=%dMB, models=%d, force_cpu=%s, loaded_ttl=%ds",
-        ROUTING_MODE, LLAMA_SERVER_URL, VRAM_HEADROOM_MB, len(_model_sizes),
-        FORCE_CPU_MODELS or "(none)", LOADED_MODELS_TTL_SECONDS,
+        "Router started — mode=%s, backend=%s, vllm_routes=%s, headroom=%dMB, models=%d, force_cpu=%s, loaded_ttl=%ds, request_timeout=%ds",
+        ROUTING_MODE, LLAMA_SERVER_URL,
+        routes_summary or "(disabled)",
+        VRAM_HEADROOM_MB, len(_model_sizes),
+        FORCE_CPU_MODELS or "(none)", LOADED_MODELS_TTL_SECONDS, REQUEST_TIMEOUT,
     )
 
 
@@ -241,6 +288,8 @@ async def _startup() -> None:
 async def _shutdown() -> None:
     if _client:
         await _client.aclose()
+    for c in _vllm_clients.values():
+        await c.aclose()
 
 
 # -- Proxy helpers ----------------------------------------------------------
@@ -264,25 +313,38 @@ async def _proxy_request(
     if strip_nulls:
         body = {k: v for k, v in body.items() if v is not None}
 
+    # Determine backend client and headers based on model name
+    client = _client
+    extra_headers: dict[str, str] = {}
     if route and "model" in body:
         original = body["model"]
         normalized = _normalize_model(original)
-        if force_cpu:
-            stem = _strip_suffix(normalized)
+        stem = _strip_suffix(normalized)
+
+        if _is_vllm_model(stem):
+            # vLLM backend: use served-model-name as-is (no -gpu/-cpu suffixes)
+            route_info = _get_vllm_route(stem)
+            client = _get_client_for_model(stem)
+            body["model"] = stem
+            if route_info and route_info.host:
+                extra_headers["Host"] = route_info.host
+            logger.info("Route (vllm): %s -> %s", original, stem)
+        elif force_cpu:
             body["model"] = stem if ROUTING_MODE == "cpu_only" else f"{stem}-cpu"
             logger.info("Forced CPU: %s -> %s", original, body["model"])
         else:
             body["model"] = await route_model(normalized)
 
     is_stream = body.get("stream", False)
+    req_headers = {"content-type": "application/json", **extra_headers}
 
     try:
-        upstream = await _client.send(
-            _client.build_request(
+        upstream = await client.send(
+            client.build_request(
                 "POST",
                 path,
                 json=body,
-                headers={"content-type": "application/json"},
+                headers=req_headers,
             ),
             stream=is_stream,
         )
@@ -370,25 +432,40 @@ async def embeddings(request: Request):
 
 @app.get("/v1/models")
 async def list_models():
-    """Return deduplicated model list.
+    """Return deduplicated model list from all backends.
 
     In split mode, strips -gpu/-cpu suffixes and deduplicates.
     In cpu_only mode, models already have clean names — still dedup for safety.
+    Merges models from both llama-server and vLLM backends.
     """
     resp = await _client.get("/v1/models")
     data = resp.json()
 
+    seen: set[str] = set()
+    deduped: list[dict] = []
+
     if "data" in data:
-        seen: set[str] = set()
-        deduped: list[dict] = []
         for model in data["data"]:
             stem = _strip_suffix(model.get("id", ""))
             if stem not in seen:
                 seen.add(stem)
                 model["id"] = stem
                 deduped.append(model)
-        data["data"] = deduped
 
+    # Merge vLLM models from all backends (skip if behind Sablier — container may be stopped)
+    for url, vllm_client in _vllm_clients.items():
+        try:
+            vllm_resp = await vllm_client.get("/v1/models", timeout=3.0)
+            vllm_data = vllm_resp.json()
+            for model in vllm_data.get("data", []):
+                model_id = model.get("id", "")
+                if model_id not in seen:
+                    seen.add(model_id)
+                    deduped.append(model)
+        except Exception as exc:
+            logger.warning("Failed to query vLLM /v1/models at %s: %s", url, exc)
+
+    data["data"] = deduped
     return JSONResponse(content=data)
 
 
