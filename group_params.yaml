@@ -5,7 +5,7 @@ mode: cpu_only
 
 gpu:
   n-gpu-layers: 999
-  sleep-idle-seconds: 600
+  sleep-idle-seconds: 1200
   batch-size: 1024
   ubatch-size: 256
 
@@ -15,4 +15,4 @@ cpu:
   ubatch-size: 256
   # threads: 8
   # ctx-size: 32768
-  sleep-idle-seconds: 300
+  sleep-idle-seconds: 1200
