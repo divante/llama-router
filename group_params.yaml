@@ -11,7 +11,7 @@ gpu:
 
 cpu:
   # kv-offload: off
-  batch-size: 512
+  batch-size: 1024
   ubatch-size: 256
   # threads: 8
   # ctx-size: 32768
