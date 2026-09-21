@@ -13,6 +13,11 @@ Outputs:
   - presets.ini for llama-server's --models-preset flag
   - model_sizes.json mapping stem -> file size in bytes (used by the router)
 
+Split GGUF models (``-NNNNN-of-MMMMM`` filename parts) are grouped by their
+shared stem: the set is exposed as ONE preset whose model path is part 00001
+(llama.cpp loads the whole set from the first part), and model_sizes.json
+records the sum of every part. The parts are never concatenated.
+
 Usage:
     python config_gen.py /models /config/presets.ini [/path/to/group_params.yaml]
 """
@@ -20,7 +25,9 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import yaml
@@ -31,6 +38,55 @@ DEFAULT_GROUP_PARAMS = {
     "gpu": {"n-gpu-layers": 999},
     "cpu": {"n-gpu-layers": 0},
 }
+
+
+# e.g. "tiny-7b-00001-of-00003.gguf" -> ("tiny-7b", 1, 3)
+SPLIT_PART_RE = re.compile(r"^(?P<stem>.+)-(?P<index>\d+)-of-(?P<total>\d+)\.gguf$")
+
+
+def group_split_parts(gguf_files: list[Path]) -> list[list[Path]]:
+    """Group split parts (-NNNNN-of-MMMMM) into ordered parts lists.
+
+    Files matching the split pattern are grouped by shared stem and declared
+    total, ordered by part number. Groups with a missing or duplicated part
+    number raise ValueError. A group with declared total 1 is a regular model
+    and is returned on its own. Files not matching the pattern are returned
+    one per group, untouched.
+    """
+    groups: dict[tuple[str, int], dict[int, Path]] = defaultdict(dict)
+    singletons: list[Path] = []
+
+    for gguf in gguf_files:
+        match = SPLIT_PART_RE.match(gguf.name)
+        if not match:
+            singletons.append([gguf])
+            continue
+        stem = match.group("stem")
+        index = int(match.group("index"))
+        total = int(match.group("total"))
+        part_map = groups[(stem, total)]
+        if index in part_map:
+            raise ValueError(
+                f"Duplicate split part {gguf.name}: part {index} of "
+                f"{stem}-{index:05d}-of-{total:05d} conflicts with "
+                f"{part_map[index].name}"
+            )
+        part_map[index] = gguf
+
+    result: list[list[Path]] = []
+    for (stem, total), part_map in sorted(groups.items()):
+        missing = [i for i in range(1, total + 1) if i not in part_map]
+        if missing:
+            raise ValueError(
+                f"Incomplete split model {stem}: declared {total} parts but "
+                f"missing part number(s) {', '.join(f'{i:05d}' for i in missing)}"
+            )
+        result.append([part_map[i] for i in range(1, total + 1)])
+    result.extend(singletons)
+    # Preserve the historical filename-sorted output order, keyed by each
+    # group's first part (which is the part the preset points at).
+    result.sort(key=lambda group: group[0].name)
+    return result
 
 
 def load_group_params(path: Path | None) -> dict[str, dict[str, str | int]]:
@@ -87,11 +143,19 @@ def generate_config(
     model_sizes: dict[str, int] = {}
     count = 0
 
-    for gguf in gguf_files:
-        stem = gguf.stem
-        model_path = str(gguf)
-        file_size = gguf.stat().st_size
-        model_sizes[stem] = file_size
+    # Split parts (-NNNNN-of-MMMMM) form one group per model; everything
+    # else is a one-file group, so a single loop handles both.
+    for group in group_split_parts(gguf_files):
+        # A split set is loaded by llama.cpp from part 00001, which holds a
+        # pointer table for the whole set. A regular file is its own part one.
+        first_part = group[0]
+        stem = first_part.stem
+        model_path = str(first_part)
+        model_sizes[stem] = sum(part.stat().st_size for part in group)
+        print(
+            f"Grouped {len(group)} split part(s) into model {stem} "
+            if len(group) > 1 else f"Model {stem}"
+        )
 
         if mode == "cpu_only":
             _append_section(lines, stem, model_path, cpu_params)

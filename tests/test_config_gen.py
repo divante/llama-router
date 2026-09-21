@@ -6,8 +6,10 @@ their default, preset section names, model paths and group parameters, the
 ``model_sizes.json`` side effect, empty-directory errors, and group-params
 loading.
 
-Split GGUF files (``-NNNNN-of-MMMMM``) are intentionally NOT covered here;
-their behavior belongs to the follow-up split-awareness task.
+Split GGUF files (``-NNNNN-of-MMMMM``) are covered in the final section:
+split parts must produce ONE preset whose model path is part 00001, with
+``model_sizes.json`` summing every part, while ordinary GGUF files keep the
+behavior pinned above.
 """
 
 from __future__ import annotations
@@ -275,3 +277,123 @@ def test_missing_mode_key_defaults_to_split(
 
     presets = _read_presets(out)
     assert sorted(presets.sections()) == ["tiny-cpu", "tiny-gpu"]
+
+
+# ---------------------------------------------------------------------------
+# split GGUF awareness (-NNNNN-of-MMMMM parts)
+# ---------------------------------------------------------------------------
+
+def test_split_parts_produce_one_preset_pointing_at_part_one(
+    tmp_path: Path,
+):
+    models = tmp_path / "models"
+    models.mkdir()
+    part1 = _write_model(models, "tiny-7b-00001-of-00003.gguf", 1000)
+    _write_model(models, "tiny-7b-00002-of-00003.gguf", 2000)
+    _write_model(models, "tiny-7b-00003-of-00003.gguf", 3000)
+    out = tmp_path / "out" / "presets.ini"
+    _generate_cpu_only(models, out, tmp_path)
+
+    presets = _read_presets(out)
+    # ONE preset for the whole split set, named after part 00001's stem.
+    assert list(presets.sections()) == ["tiny-7b-00001-of-00003"]
+    assert presets["tiny-7b-00001-of-00003"]["model"] == str(part1.resolve())
+
+
+def test_split_parts_sum_into_model_sizes_json(tmp_path: Path):
+    models = tmp_path / "models"
+    models.mkdir()
+    _write_model(models, "tiny-7b-00001-of-00003.gguf", 1000)
+    _write_model(models, "tiny-7b-00002-of-00003.gguf", 2000)
+    _write_model(models, "tiny-7b-00003-of-00003.gguf", 3000)
+    out = tmp_path / "out" / "presets.ini"
+    _generate_split(models, out, tmp_path)
+
+    sizes = json.loads((out.parent / "model_sizes.json").read_text())
+    # One entry, summing EVERY part.
+    assert sizes == {"tiny-7b-00001-of-00003": 6000}
+
+
+def test_split_mode_emits_gpu_and_cpu_presets_from_part_one(
+    tmp_path: Path,
+):
+    models = tmp_path / "models"
+    models.mkdir()
+    part1 = _write_model(models, "big-00001-of-00002.gguf", 8)
+    _write_model(models, "big-00002-of-00002.gguf", 8)
+    out = tmp_path / "out" / "presets.ini"
+    _generate_split(models, out, tmp_path)
+
+    presets = _read_presets(out)
+    assert sorted(presets.sections()) == ["big-00001-of-00002-cpu",
+                                          "big-00001-of-00002-gpu"]
+    assert presets["big-00001-of-00002-gpu"]["model"] == str(part1.resolve())
+    assert presets["big-00001-of-00002-gpu"]["n-gpu-layers"] == "999"
+    assert presets["big-00001-of-00002-cpu"]["model"] == str(part1.resolve())
+    assert presets["big-00001-of-00002-cpu"]["n-gpu-layers"] == "0"
+
+
+def test_split_and_ordinary_models_coexist(tmp_path: Path):
+    models = tmp_path / "models"
+    models.mkdir()
+    _write_model(models, "plain.gguf", 100)
+    _write_model(models, "tiny-7b-00001-of-00003.gguf", 1000)
+    _write_model(models, "tiny-7b-00002-of-00003.gguf", 2000)
+    _write_model(models, "tiny-7b-00003-of-00003.gguf", 3000)
+    out = tmp_path / "out" / "presets.ini"
+    _generate_cpu_only(models, out, tmp_path)
+
+    presets = _read_presets(out)
+    assert list(presets.sections()) == [
+        "plain", "tiny-7b-00001-of-00003"
+    ]
+    sizes = json.loads((out.parent / "model_sizes.json").read_text())
+    assert sizes == {"plain": 100, "tiny-7b-00001-of-00003": 6000}
+
+
+def test_incomplete_split_group_fails_closed(tmp_path: Path):
+    models = tmp_path / "models"
+    models.mkdir()
+    _write_model(models, "tiny-7b-00001-of-00003.gguf", 1000)
+    _write_model(models, "tiny-7b-00002-of-00003.gguf", 2000)
+    # Part 00003 is missing: the set would be unloadable, so refuse.
+    out = tmp_path / "out" / "presets.ini"
+    with pytest.raises(ValueError, match="Incomplete split model tiny-7b"):
+        _generate_cpu_only(models, out, tmp_path)
+    assert not out.exists()
+
+
+def test_different_declared_totals_stay_separate_models(tmp_path: Path):
+    models = tmp_path / "models"
+    models.mkdir()
+    # Same stem but different declared totals name two distinct sets.
+    _write_model(models, "tiny-7b-00001-of-00002.gguf", 1000)
+    _write_model(models, "tiny-7b-00002-of-00002.gguf", 1000)
+    _write_model(models, "tiny-7b-00001-of-00003.gguf", 1000)
+    _write_model(models, "tiny-7b-00002-of-00003.gguf", 1000)
+    _write_model(models, "tiny-7b-00003-of-00003.gguf", 1000)
+    out = tmp_path / "out" / "presets.ini"
+    _generate_cpu_only(models, out, tmp_path)
+
+    presets = _read_presets(out)
+    # Each set gets its own preset from its own part one.
+    assert sorted(presets.sections()) == [
+        "tiny-7b-00001-of-00002", "tiny-7b-00001-of-00003"
+    ]
+    sizes = json.loads((out.parent / "model_sizes.json").read_text())
+    assert sizes == {"tiny-7b-00001-of-00002": 2000,
+                     "tiny-7b-00001-of-00003": 3000}
+
+
+def test_duplicate_split_part_raises(tmp_path: Path):
+    models = tmp_path / "models"
+    models.mkdir()
+    _write_model(models, "tiny-7b-00001-of-00002.gguf", 1000)
+    _write_model(models, "tiny-7b-00001-of-00003.gguf", 1000)
+    _write_model(models, "tiny-7b-00002-of-00002.gguf", 1000)
+    _write_model(models, "tiny-7b-00002-of-00003.gguf", 1000)
+    # A fourth file re-claims part 00002 of the -of-00002 set; the two
+    # different filenames cannot both be that part.
+    files = sorted(models.glob("*.gguf"))
+    with pytest.raises(ValueError, match="Duplicate split part"):
+        config_gen.group_split_parts(files + [files[3]])
