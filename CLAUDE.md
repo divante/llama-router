@@ -22,6 +22,23 @@ Each vLLM container serves one model. The router maps model names to backend URL
 - `Dockerfile` — Container build
 - `requirements.txt` — Python dependencies
 
+## Canonical full suite
+
+```bash
+cd <this repo> && make test
+```
+
+`make test` is the exact full-suite command and the deterministic command
+gate used by the Spectre City python-service workflow. Any change to this
+repository must leave it green. The Makefile pins `python3.12` as the
+default interpreter (`PYTHON ?= python3.12`) because the system `python3`
+(3.14) on Normandy lacks the project's runtime deps; override with
+`make test PYTHON=...` where the deps live elsewhere.
+
+Baseline tests live in `tests/test_config_gen.py` and characterize the
+ordinary-GGUF behavior of `config_gen.py` (both modes, preset sections,
+`model_sizes.json`, error paths, group-params loading).
+
 ## Endpoints
 
 - `POST /v1/chat/completions` — Proxied chat completions with model routing
